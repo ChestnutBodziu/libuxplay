@@ -23,7 +23,8 @@ typedef enum {
     UXP_EVT_PROGRESS,             /* rtp_start, rtp_curr, rtp_end (44100 Hz ticks) */
     UXP_EVT_VOLUME,               /* volume_db: -30..0, -144 = mute */
     UXP_EVT_DACP,                 /* dacp_id, active_remote */
-    UXP_EVT_AUDIO_FLUSH           /* audio stream flushed (seek / track change) */
+    UXP_EVT_AUDIO_FLUSH,          /* audio stream flushed (seek / track change) */
+    UXP_EVT_AUDIO_ACTIVITY        /* audio packets are arriving; sent at most 4x/s */
 } uxp_event_type;
 
 typedef struct {

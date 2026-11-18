@@ -73,6 +73,7 @@
 #include "renderers/video_renderer.h"
 #include "renderers/audio_renderer.h"
 #include <mutex>
+#include <atomic>
 
 /* ---- GUI event bridge (see uxplay_api.h) ---- */
 static std::mutex uxp_event_mutex;
@@ -2502,6 +2503,15 @@ extern "C" void report_client_request(void *cls, char *deviceid, char * model, c
 }
 
 extern "C" void audio_process (void *cls, raop_ntp_t *ntp, audio_decode_struct *data) {
+    {
+        /* throttled activity signal for GUI front-ends (pause detection) */
+        static std::atomic<int64_t> last_activity_us(0);
+        const int64_t now_us = g_get_monotonic_time();
+        if (now_us - last_activity_us.load(std::memory_order_relaxed) >= 250000) {
+            last_activity_us.store(now_us, std::memory_order_relaxed);
+            uxp_emit(uxp_make_event(UXP_EVT_AUDIO_ACTIVITY));
+        }
+    }
     if (dump_audio) {
         dump_audio_to_file(data->data, data->data_len, (data->data)[0] & 0xf0);
     }
