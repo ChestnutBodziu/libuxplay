@@ -72,6 +72,33 @@
 #include "lib/crypto.h"
 #include "renderers/video_renderer.h"
 #include "renderers/audio_renderer.h"
+#include <mutex>
+
+/* ---- GUI event bridge (see uxplay_api.h) ---- */
+static std::mutex uxp_event_mutex;
+static uxp_event_cb uxp_event_callback = NULL;
+static void *uxp_event_user = NULL;
+static std::string ev_title, ev_artist, ev_album;
+
+void uxplay_set_event_callback(uxp_event_cb cb, void *user) {
+    std::lock_guard<std::mutex> lock(uxp_event_mutex);
+    uxp_event_callback = cb;
+    uxp_event_user = user;
+}
+
+static void uxp_emit(const uxp_event &ev) {
+    std::lock_guard<std::mutex> lock(uxp_event_mutex);
+    if (uxp_event_callback) {
+        uxp_event_callback(&ev, uxp_event_user);
+    }
+}
+
+static uxp_event uxp_make_event(uxp_event_type type) {
+    uxp_event ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.type = type;
+    return ev;
+}
 #include "renderers/mux_renderer.h"
 #ifdef DBUS
 #include <dbus/dbus.h>
@@ -1934,6 +1961,7 @@ static void process_metadata(int count, const char *dmap_tag, const unsigned cha
                 break;
             case 'l':
                 metadata_text->append("Album: ");  /*asal*/
+                ev_album.assign((const char *) metadata, datalen);
                 if (render_coverart) {
                     track_album.erase();
                     track_album.append(metadata, metadata + datalen);
@@ -1941,6 +1969,7 @@ static void process_metadata(int count, const char *dmap_tag, const unsigned cha
                 break;
             case 'r':
                 metadata_text->append("Artist: ");  /*asar*/
+                ev_artist.assign((const char *) metadata, datalen);
                 if (render_coverart) {
                     artist.erase();
                     artist.append(metadata, metadata + datalen);
@@ -2021,6 +2050,7 @@ static void process_metadata(int count, const char *dmap_tag, const unsigned cha
     } else if (strcmp (dmap_tag, "minm") == 0) {
         dmap_type = 9;
         metadata_text->append("Title: ");
+        ev_title.assign((const char *) metadata, datalen);
         if (render_coverart) {
             track_title.erase();
             track_title.append(metadata, metadata + datalen);
@@ -2376,6 +2406,12 @@ extern "C" const char *passwd(void *cls, int *len){
 }
 
 extern "C" void export_dacp(void *cls, const char *active_remote, const char *dacp_id) {
+    {
+        uxp_event ev = uxp_make_event(UXP_EVT_DACP);
+        ev.dacp_id = dacp_id;
+        ev.active_remote = active_remote;
+        uxp_emit(ev);
+    }
       if (dacpfile.length()) {
         FILE *fp = fopen_utf8(dacpfile.c_str(), "w");
         if (fp) {
@@ -2398,6 +2434,7 @@ extern "C" void conn_destroy (void *cls) {
     open_connections--;
     LOGD("Open connections: %i", open_connections);
     if (open_connections == 0) {
+        uxp_emit(uxp_make_event(UXP_EVT_CLIENT_DISCONNECTED));
         remote_clock_offset = 0;
         if (use_audio) {
             audio_renderer_stop();
@@ -2450,6 +2487,13 @@ extern "C" void report_client_request(void *cls, char *deviceid, char * model, c
     if (check_blocked_client(deviceid)) {
         *admit = false;
         LOGI("*** attempt to connect by blocked client (clientID %s): DENIED\n", deviceid);
+    }
+    if (*admit) {
+        uxp_event ev = uxp_make_event(UXP_EVT_CLIENT_CONNECTED);
+        ev.device_name = name;
+        ev.device_model = model;
+        ev.device_id = deviceid;
+        uxp_emit(ev);
     }
     // Pass device model to renderer for device frame display
     if (*admit && use_video) {
@@ -2545,6 +2589,7 @@ extern "C" void video_resume (void *cls) {
 
 
 extern "C" void audio_flush (void *cls) {
+    uxp_emit(uxp_make_event(UXP_EVT_AUDIO_FLUSH));
     if (use_audio) {
         audio_renderer_flush();
     }
@@ -2562,6 +2607,11 @@ extern "C" double audio_set_client_volume(void *cls) {
 
 extern "C" void audio_set_volume (void *cls, float volume) {
     double db, db_flat, frac, gst_volume;
+    {
+        uxp_event ev = uxp_make_event(UXP_EVT_VOLUME);
+        ev.volume_db = volume;
+        uxp_emit(ev);
+    }
     if (!use_audio) {
       return;
     }
@@ -2649,6 +2699,12 @@ extern "C" void video_report_size(void *cls, float *width_source, float *height_
 }
 
 extern "C" void audio_set_coverart(void *cls, const void *buffer, int buflen) {
+    if (buffer && buflen > 0) {
+        uxp_event ev = uxp_make_event(UXP_EVT_COVERART);
+        ev.data = buffer;
+        ev.data_len = (size_t) buflen;
+        uxp_emit(ev);
+    }
     if (buffer && coverart_filename.length()) {
         write_coverart(coverart_filename.c_str(), buffer, buflen);
         LOGI("coverart size %d written to %s", buflen,  coverart_filename.c_str());
@@ -2669,6 +2725,13 @@ extern "C" void audio_set_progress(void *cls, uint32_t *start, uint32_t *curr, u
     rtptime_start = *start;
     rtptime = *curr;
     rtptime_end = *end;
+    {
+        uxp_event ev = uxp_make_event(UXP_EVT_PROGRESS);
+        ev.rtp_start = *start;
+        ev.rtp_curr = *curr;
+        ev.rtp_end = *end;
+        uxp_emit(ev);
+    }
     display_progress(rtptime_start, rtptime, rtptime_end);
 }
 
@@ -2680,6 +2743,9 @@ extern "C" void audio_set_metadata(void *cls, const void *buffer, int buflen) {
 
     printf("====================Audio Metadata==================\n");
 
+    ev_title.clear();
+    ev_artist.clear();
+    ev_album.clear();
     if (buflen < 8) {
         LOGE("received invalid metadata, length %d < 8", buflen);
         return;
@@ -2709,6 +2775,13 @@ extern "C" void audio_set_metadata(void *cls, const void *buffer, int buflen) {
         buflen -= datalen;
     }
     LOGI("%s", metadata_text.c_str());
+    {
+        uxp_event ev = uxp_make_event(UXP_EVT_METADATA);
+        ev.title = ev_title.empty() ? NULL : ev_title.c_str();
+        ev.artist = ev_artist.empty() ? NULL : ev_artist.c_str();
+        ev.album = ev_album.empty() ? NULL : ev_album.c_str();
+        uxp_emit(ev);
+    }
     if (metadata_filename.length()) {
         write_metadata(metadata_filename.c_str(), metadata_text.c_str());
     }
